@@ -67,6 +67,11 @@ class Server:
                           "contents": {"data": {"online": False}}},
         )
         self.mqttComm.mqtt_init()
+        if not self.mqttComm.wait_connected(timeout=5.0):
+            raise RuntimeError(
+                f"[Server] could not connect to MQTT broker at "
+                f"{mqtt_ip} within 5s"
+            )
         self.mqttComm.sendIt(BRIDGE_STATUS_TOPIC, {"online": True})
 
     def _run_loop(self):

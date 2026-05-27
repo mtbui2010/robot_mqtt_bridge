@@ -39,6 +39,7 @@ class MqttComm:
         self._publish_infos = []
         self._stop_event = external_stop_event or threading.Event()
         self._resp_lock = threading.Lock()
+        self._connected_event = threading.Event()
         self._will_topic = will_topic
         self._will_payload = will_payload
 
@@ -207,9 +208,14 @@ class MqttComm:
                 print("[MQTT] Connected.")
             self.con_mqtt.subscribe(self.subscribeTopics)
             self.mqtt_connect_flag = True
+            self._connected_event.set()
         else:
             if self.bPrint:
                 print(f"[MQTT] Connect failed with result code {rc}")
+
+    def wait_connected(self, timeout: float = 5.0) -> bool:
+        """Block until CONNACK arrives. Returns False on timeout."""
+        return self._connected_event.wait(timeout)
 
     def publish_mqtt(self, topic, result):
         if result is None or len(result) == 0:

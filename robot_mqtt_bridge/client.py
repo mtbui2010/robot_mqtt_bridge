@@ -38,6 +38,11 @@ class MqttClient:
             bPrint=bPrint,
         )
         self.mqttComm.mqtt_init()
+        if not self.mqttComm.wait_connected(timeout=5.0):
+            raise RuntimeError(
+                f"[MqttClient] could not connect to MQTT broker at "
+                f"{mqttConnectIP} within 5s"
+            )
 
     def commWork(self, plan: str, timeout: float):
         """Send a structured plan and block for the result.
