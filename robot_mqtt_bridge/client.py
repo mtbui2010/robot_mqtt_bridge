@@ -27,7 +27,7 @@ class MqttClient:
         self.KETI_TASK_MQTT_TOPIC = KETI_TASK_TOPIC
         self.PLAN_RESULT_MQTT_TOPIC = PLAN_RESULT_TOPIC
 
-        mqttConnectIP = mqtt_ip or os.environ.get('MQTT_SERVER_IP', 'localhost')
+        mqttConnectIP = mqtt_ip or os.environ.get('MQTT_SERVER_IP', '0.0.0.0')
         mqttSubscribeTopics = [(self.PLAN_RESULT_MQTT_TOPIC, 1)]
 
         self.mqttComm = MqttComm(
@@ -104,7 +104,7 @@ def main():
         description="MQTT client for the robot_agent bridge",
     )
     p.add_argument("--mqtt-ip",
-                   default=os.environ.get("MQTT_SERVER_IP", "localhost"),
+                   default=os.environ.get("MQTT_SERVER_IP", "0.0.0.0"),
                    help="MQTT broker IP (or ip/user/pass)")
     p.add_argument("--timeout", type=float, default=180,
                    help="result timeout in seconds (default 180)")

@@ -1,250 +1,299 @@
 # robot_mqtt_bridge
 
-Self-contained Python package that bridges an MQTT broker with a running
-[robot_agent](../robot_agent) instance. Receives structured plans over
-MQTT, forwards them to robot_agent's `/ws/agent` WebSocket in direct
-mode (no LLM), and publishes the final result back to MQTT.
+MQTT ↔ [robot_agent](../robot_agent) bridge as an installable Python
+package. Sends structured plans (`find::apple\nmove::kitchen`) over MQTT
+to a running robot_agent, executes them via `/ws/agent` in direct mode
+(no LLM), and publishes the result back.
 
 ```
-MQTT client ──► broker ──► robot-mqtt-server ──► ws://localhost:8001/ws/agent
-                                  │
-              ◄────── broker ◄────┘ (result)
+your script / mosquitto_pub ─► broker ─► robot-mqtt-server ─► ws://…/ws/agent
+                                              │
+                       ◄────── broker ◄───────┘ (final result)
 ```
 
-## Layout
+---
 
-```
-robot_mqtt_bridge/
-├── pyproject.toml             # package metadata, deps, CLI entry points
-├── README.md
-└── robot_mqtt_bridge/         # the actual package
-    ├── __init__.py            # exports MqttComm, Server, MqttClient
-    ├── mqtt_comm.py           # MqttComm — transport
-    ├── server.py              # Server + `robot-mqtt-server` CLI
-    └── client.py              # MqttClient + `robot-mqtt-client` CLI
+## Quickstart
+
+```bash
+# 0. install
+pip install -e .
+
+# 1. start the robot backend (port 8001)
+cd ../kcare_robot && uvicorn kcare_robot.main:app --port 8001
+
+# 2. start the bridge
+robot-mqtt-server --mqtt-ip <broker-ip>
+
+# 3. send a plan
+robot-mqtt-client --mqtt-ip <broker-ip> action move kitchen
+# → "move complete"   (exit code 0)
 ```
 
-Self-contained: only depends on `paho-mqtt`, `websockets`, `numpy`.
+That's it. Skip to [Common scenarios](#common-scenarios) for what to do
+next.
+
+---
 
 ## Install
 
 ```bash
-# editable install for development
-pip install -e .
-
-# or a normal install
-pip install .
+pip install -e .       # editable (dev)
+pip install .          # normal
 ```
 
-Installs two CLI commands: `robot-mqtt-server` and `robot-mqtt-client`.
+Dependencies (auto-installed): `paho-mqtt`, `websockets`, `numpy`.
 
-## Topics
+Provides two CLI commands:
+- `robot-mqtt-server` — the bridge daemon
+- `robot-mqtt-client` — convenience CLI for sending plans
 
-| Topic | Dir | Schema |
-|---|---|---|
-| `cotap/keti/task/plan` | in | `{contents:{data:{plan:"find::apple\nmove::kitchen", request_id?:"..."}}}` |
-| `cotap/common/plan_result` | out | `{contents:{data:{result:{action,isdone,error?,...}, request_id?:"..."}}}` |
-| `cotap/keti/bridge/status` | out (retained + LWT) | `{contents:{data:{online:true\|false}}}` |
-
-Envelope `{timestamp, contents:{data:...}}` is produced/consumed by
-`MqttComm.sendIt()`.
-
-### `action` field semantics
-
-- Single-task step (`find::apple`) → `action = "find"`
-- Parallel step (`move::a && grip::1`) → `action = "move&grip"`
-- Bridge busy (refused) → `action = "busy"`
-- Couldn't determine → `action = "unknown"`
-
-`isdone` mirrors robot_agent's final `done.success` (false on transport
-error or any step failure).
-
-## Usage — CLI
-
-### 1. Start robot_agent
-
-```bash
-cd ../kcare_robot && uvicorn kcare_robot.main:app --port 8001
+Public Python API:
+```python
+from robot_mqtt_bridge import MqttComm, Server, MqttClient
 ```
 
-### 2. Start the bridge server
+---
+
+## CLI cheatsheet
+
+### Server
+
+| Command | Purpose |
+|---|---|
+| `robot-mqtt-server` | start with defaults (`ws://0.0.0.0:8001`, `0.0.0.0` broker) |
+| `robot-mqtt-server --agent-url ws://HOST:8001 --mqtt-ip BROKER` | explicit endpoints |
+| `robot-mqtt-server --mqtt-ip "BROKER/user/pass"` | broker auth (slash-separated) |
+| `robot-mqtt-server --quiet` | suppress logs |
+| `AGENT_URL=… MQTT_SERVER_IP=… robot-mqtt-server` | via env vars |
+
+Stops cleanly on `Ctrl+C` / `SIGTERM` (publishes `online:false`).
+
+### Client
+
+| Command | Purpose |
+|---|---|
+| `robot-mqtt-client action move kitchen` | one skill, target = "kitchen" |
+| `robot-mqtt-client action lift 200` | lift to 200 |
+| `robot-mqtt-client action grip 1` | grip close (`0` = open) |
+| `robot-mqtt-client action init_arm` | reset arm |
+| `robot-mqtt-client plan "find::apple\nmove::kitchen\npick::"` | raw multi-step plan |
+| `robot-mqtt-client --mqtt-ip BROKER plan "..."` | non-default broker |
+| `robot-mqtt-client --timeout 60 plan "..."` | custom timeout (default 180s) |
+
+Exit code: `0` success, `1` failure/timeout.
+
+Defaults: both CLIs use `--mqtt-ip 0.0.0.0` and the server uses
+`--agent-url ws://0.0.0.0:8001`. Override with flags or
+`MQTT_SERVER_IP` / `AGENT_URL` env vars.
+
+---
+
+## Common scenarios
+
+### A. Same machine, default ports
 
 ```bash
-robot-mqtt-server                                                  # defaults
-robot-mqtt-server --agent-url ws://localhost:8001 --mqtt-ip 192.168.1.200
-robot-mqtt-server --mqtt-ip "192.168.1.200/admin/secret"           # with auth
-robot-mqtt-server --quiet
-
-# via env vars
-AGENT_URL=ws://localhost:8001 MQTT_SERVER_IP=192.168.1.200 robot-mqtt-server
+# terminal 1
+uvicorn kcare_robot.main:app --port 8001
+# terminal 2
+robot-mqtt-server
+# terminal 3
+robot-mqtt-client action move kitchen
 ```
 
-Defaults: `--agent-url ws://localhost:8001`, `--mqtt-ip 192.168.1.200`
-(or `$MQTT_SERVER_IP`).
-
-### 3. Send a plan with the bundled CLI client
+### B. Bridge on robot, broker on a different host
 
 ```bash
-# single-skill convenience
-robot-mqtt-client action move "table@living room"
-robot-mqtt-client action lift 200
-robot-mqtt-client action grip 1
-robot-mqtt-client action init_arm
+robot-mqtt-server --mqtt-ip 192.168.1.200
+```
 
-# arbitrary multi-step plan (use \n for newlines)
+Clients elsewhere on the network point at the same broker:
+```bash
+robot-mqtt-client --mqtt-ip 192.168.1.200 action lift 100
+```
+
+### C. Sending a multi-step plan
+
+```bash
 robot-mqtt-client plan "find::apple\nmove::kitchen\npick::"
-
-# point at a different broker
-robot-mqtt-client --mqtt-ip 192.168.1.200 action move kitchen
-
-# custom timeout
-robot-mqtt-client --timeout 60 action lift 100
 ```
 
-Exit code: `0` on success, `1` on failure/timeout.
-
-### 4. Or use raw `mosquitto_pub` / `mosquitto_sub`
+Newlines are literal `\n` in the CLI (decoded internally). Or pipe from
+a file:
 
 ```bash
-# subscribe in one terminal
+robot-mqtt-client plan "$(cat my_plan.txt | tr '\n' '|' | sed 's/|/\\n/g')"
+```
+
+### D. Driving from Python (no broker, no fuss)
+
+```python
+from robot_mqtt_bridge import MqttClient
+
+client = MqttClient(bPrint=True, mqtt_ip="192.168.1.200")
+try:
+    client.actionWork("move", "kitchen")
+    client.actionWork("lift", 200)
+    ok = client.commWork("find::apple\nmove::kitchen\npick::", timeout=180)
+    print("done" if ok else "failed")
+finally:
+    client.close()
+```
+
+### E. Driving from a non-Python language (raw MQTT)
+
+Anything that speaks MQTT can send a plan. JS / Go / shell — just match
+the envelope:
+
+```bash
+# subscribe to results
 mosquitto_sub -h 192.168.1.200 -t 'cotap/common/plan_result' -v
 
-# publish a structured plan
+# publish a plan
 mosquitto_pub -h 192.168.1.200 -t 'cotap/keti/task/plan' -m '{
   "timestamp": "2026-05-27 14:30:00",
   "contents": {"data": {"plan": "find::apple\nmove::kitchen"}}
 }'
 ```
 
-Expected response:
+### F. Concurrent clients — use `request_id`
 
-```json
-{
-  "timestamp": "2026-05-27 14:30:30",
-  "contents": {"data": {"result": {
-    "action": "move",
-    "isdone": true,
-    "pose": [1.2, 3.4]
-  }}}
+When several clients share a broker, results on
+`cotap/common/plan_result` get cross-delivered. Add a `request_id` to
+the plan and filter on it client-side:
+
+```python
+import uuid
+req_id = str(uuid.uuid4())
+
+# (via raw paho — MqttClient currently doesn't expose request_id)
+payload = {
+    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "contents": {"data": {"plan": "lift::200", "request_id": req_id}},
 }
 ```
 
-With `request_id` for correlation (echoed at `contents.data.request_id`):
+The server echoes `request_id` at `contents.data.request_id` in the
+response.
 
-```bash
-mosquitto_pub -h 192.168.1.200 -t 'cotap/keti/task/plan' -m '{
-  "timestamp": "2026-05-27 14:30:00",
-  "contents": {"data": {
-    "plan": "lift::200",
-    "request_id": "req-abc-123"
-  }}
-}'
-```
-
-## Usage — Python API
-
-### High-level client
-
-```python
-from robot_mqtt_bridge import MqttClient
-
-client = MqttClient(bPrint=True)             # or mqtt_ip="192.168.1.200"
-
-# convenience: single-skill plans
-client.actionWork("move", "table@living room")
-client.actionWork("lift", "200")
-client.actionWork("grip", 1)
-client.actionWork("init_arm", None)
-
-# arbitrary multi-step plan
-ok = client.commWork("find::apple\nmove::kitchen\npick::", timeout=180)
-print("success" if ok else "failed/timeout")
-
-client.close()
-```
-
-### Embed the server in another process
+### G. Embedding the bridge inside another Python service
 
 ```python
 from robot_mqtt_bridge import Server
 
 server = Server(agent_ws_url="ws://localhost:8001",
-                mqtt_ip="192.168.1.200",
-                bPrint=True)
-# Runs in background threads. Do your own work, then:
+                mqtt_ip="192.168.1.200")
+# server runs on background threads; do your own work...
 server.shutdown()
 ```
 
-### Low-level transport (for ad-hoc pub/sub)
+### H. Just want pub/sub, no plans
 
 ```python
 from robot_mqtt_bridge import MqttComm
 
-def on_msg(topic, payload):
-    print(topic, payload)
-
-bus = MqttComm("192.168.1.200", [("foo/#", 1)], on_msg_callback=on_msg)
+bus = MqttComm("192.168.1.200", [("foo/#", 1)],
+               on_msg_callback=lambda t, d: print(t, d))
 bus.mqtt_init()
-
-bus.sendIt("foo/bar", {"hello": "world"})            # envelope-wrapped
-bus.publish_mqtt("foo/raw", {"plain": "json"})       # no envelope
-
-# blocking request/response (uses the TTL response cache)
-resp = bus.getIt_f("foo/bar", timeout=5)             # → {timestamp,data} | None
-
+bus.sendIt("foo/bar", {"hello": "world"})         # envelope-wrapped
+resp = bus.getIt_f("foo/bar", timeout=5)          # blocking get
 bus.flush_and_close()
 ```
 
-### Ad-hoc client without the package
+---
 
-If you just want to publish from a script that already has `paho-mqtt`:
+## Protocol reference
 
-```python
-import json, time, uuid
-import paho.mqtt.client as mqtt
+### Topics
 
-BROKER = "192.168.1.200"
-REQ_ID = str(uuid.uuid4())
-result_holder = {}
+| Topic | Dir | Schema (inside the envelope) |
+|---|---|---|
+| `cotap/keti/task/plan` | client → bridge | `{plan:"find::apple\nmove::kitchen", request_id?:"..."}` |
+| `cotap/common/plan_result` | bridge → client | `{result:{action,isdone,error?,...}, request_id?:"..."}` |
+| `cotap/keti/bridge/status` | bridge → all (retained, LWT) | `{online:true\|false}` |
 
-def on_message(client, userdata, msg):
-    data = json.loads(msg.payload)["contents"]["data"]
-    if data.get("request_id") == REQ_ID:
-        result_holder["res"] = data["result"]
+All messages share the envelope produced by `MqttComm.sendIt()`:
 
-c = mqtt.Client()
-c.on_message = on_message
-c.connect(BROKER, 1883)
-c.subscribe("cotap/common/plan_result", qos=1)
-c.loop_start()
-
-payload = {
-    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    "contents": {"data": {
-        "plan": "find::apple\nmove::kitchen",
-        "request_id": REQ_ID,
-    }},
+```json
+{
+  "timestamp": "2026-05-27 14:30:00",
+  "contents": {"data": { ... topic-specific schema ... }}
 }
-c.publish("cotap/keti/task/plan", json.dumps(payload), qos=1)
-
-deadline = time.time() + 180
-while "res" not in result_holder and time.time() < deadline:
-    time.sleep(0.1)
-
-c.loop_stop()
-c.disconnect()
-print(result_holder.get("res") or "timeout")
 ```
+
+### Plan syntax (`direct=true` mode of robot_agent)
+
+```
+SKILL::ARGS                        # one task
+SKILL1::ARGS && SKILL2::ARGS       # parallel within a step
+SKILL_A::...                       # multiple lines = sequential steps
+SKILL_B::...
+```
+
+Example: `find::apple\nmove::kitchen && grip::1\npick::`
+
+### Result fields
+
+- `action` — name of the LAST step:
+  - single task → `"move"`
+  - parallel → `"move&grip"`
+  - bridge rejected (busy) → `"busy"`
+  - undetermined → `"unknown"`
+- `isdone` — `true` if robot_agent reported `done.success` AND no
+  transport error.
+- `error` — present only on failure (transport error or agent `error`
+  event).
+- Plus any fields returned by the last skill (`pose`, `data`, etc.).
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Client hangs, eventually prints `No result` | Bridge not running, or `robot_agent` down | `robot-mqtt-server` running? `curl localhost:8001/skills` returns? |
+| `action="busy"` returned immediately | Another plan still executing | Wait or queue plans client-side (bridge enforces serial execution) |
+| `action="unknown"`, `error="ws transport error: ..."` | Bridge can't reach robot_agent | Check `--agent-url`; agent listening on port? |
+| Cross-talk between clients | Multiple clients on same broker | Use `request_id` to filter (see scenario F) |
+| Doesn't connect to broker on a fresh container | `0.0.0.0` default doesn't resolve | Set `--mqtt-ip` or `MQTT_SERVER_IP` to the actual broker host |
+| Bridge died silently, retained `online:true` lingers | Last Will didn't trigger (clean shutdown) | The bridge publishes `online:false` on `SIGTERM`; LWT only fires on hard disconnect |
+
+To inspect what's flowing on the broker:
+
+```bash
+mosquitto_sub -h <broker> -t 'cotap/#' -v
+```
+
+---
 
 ## Limitations
 
 - **One plan at a time.** robot_agent is unsafe under concurrent skill
-  execution. Server holds an `asyncio.Lock` and rejects overlapping
-  plans with `{action:"busy", isdone:false}`.
-- **Single broker, multiple clients = cross-talk** on the result topic.
-  Pass `request_id` to filter.
-- **Final result only** — per-step events from the WS stream are not
-  republished. Add a topic + handler inside `Server.exec_plan` if you
-  want progress events.
-- **WS connection per plan** — no pooling; failures surface as `error`
-  field in the result.
+  execution. The bridge holds an `asyncio.Lock` and rejects overlapping
+  plans with `action:"busy"`.
+- **Final result only.** Per-step events from the WebSocket stream
+  (`step_start`, `step_log`, `step_done`) are not republished. Add a
+  topic + handler inside `Server.exec_plan` if you want progress.
+- **WS connection per plan.** No pooling; transport failures appear in
+  the result's `error` field.
+- **No request queue.** Clients must serialize themselves (or accept
+  `busy` rejections).
+- **`0.0.0.0` default IP** isn't a valid "connect to" address on all
+  platforms — works on Linux (resolves to loopback) but be explicit
+  with `--mqtt-ip` in production.
+
+---
+
+## Layout
+
+```
+robot_mqtt_bridge/
+├── pyproject.toml             # metadata + deps + 2 CLI entry points
+├── README.md
+└── robot_mqtt_bridge/         # the package
+    ├── __init__.py            # exports MqttComm, Server, MqttClient
+    ├── mqtt_comm.py           # MqttComm — paho-mqtt wrapper
+    ├── server.py              # Server class + `robot-mqtt-server` CLI
+    └── client.py              # MqttClient + `robot-mqtt-client` CLI
+```
