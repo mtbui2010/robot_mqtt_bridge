@@ -39,7 +39,7 @@ def _task_action_name(task_str: str) -> str:
 
 class Server:
 
-    def __init__(self, agent_ws_url: str = "ws://0.0.0.0:8001",
+    def __init__(self, agent_ws_url: str = "ws://localhost:8001",
                  mqtt_ip: str | None = None, bPrint: bool = True):
         self.bPrint = bPrint
         self.agent_ws_url = agent_ws_url.rstrip("/") + "/ws/agent"
@@ -179,8 +179,8 @@ def main():
         description="MQTT ↔ robot_agent bridge server",
     )
     p.add_argument("--agent-url",
-                   default=os.environ.get("AGENT_URL", "ws://0.0.0.0:8001"),
-                   help="robot_agent base URL (default ws://0.0.0.0:8001)")
+                   default=os.environ.get("AGENT_URL", "ws://localhost:8001"),
+                   help="robot_agent base URL (default ws://localhost:8001)")
     p.add_argument("--mqtt-ip",
                    default=os.environ.get("MQTT_SERVER_IP", "0.0.0.0"),
                    help="MQTT broker IP (or ip/user/pass)")
