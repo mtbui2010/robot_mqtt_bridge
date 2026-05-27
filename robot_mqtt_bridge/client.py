@@ -7,6 +7,7 @@ Publishes to `cotap/keti/task/plan` and blocks on
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -27,7 +28,12 @@ class MqttClient:
         self.KETI_TASK_MQTT_TOPIC = KETI_TASK_TOPIC
         self.PLAN_RESULT_MQTT_TOPIC = PLAN_RESULT_TOPIC
 
-        mqttConnectIP = mqtt_ip or os.environ.get('MQTT_SERVER_IP', '0.0.0.0')
+        mqttConnectIP = mqtt_ip or os.environ.get('MQTT_SERVER_IP')
+        if not mqttConnectIP:
+            raise ValueError(
+                "[MqttClient] MQTT broker IP is required. "
+                "Pass mqtt_ip=... or set the MQTT_SERVER_IP env var."
+            )
         mqttSubscribeTopics = [(self.PLAN_RESULT_MQTT_TOPIC, 1)]
 
         self.mqttComm = MqttComm(
@@ -44,38 +50,40 @@ class MqttClient:
                 f"{mqttConnectIP} within 5s"
             )
 
-    def commWork(self, plan: str, timeout: float):
+    def commWork(self, plan: str, timeout: float) -> dict | None:
         """Send a structured plan and block for the result.
 
-        Returns True if isdone, False on failure, None if stopped.
+        Returns:
+            dict: full result payload, at least ``{action, isdone, ...}``,
+                  plus any fields the executing skill returned. On agent
+                  failure the dict contains ``isdone=False`` and usually
+                  an ``error`` field.
+            None: timeout (no response within ``timeout``) or client
+                  was stopped.
+
+        Raises:
+            RuntimeError: malformed response from the bridge.
         """
         self.mqttComm.sendIt(self.KETI_TASK_MQTT_TOPIC, {'plan': plan})
         plan_result = self.mqttComm.getIt_f(self.PLAN_RESULT_MQTT_TOPIC, timeout)
 
         if self.mqttComm.is_stopped():
             return None
-
         if not plan_result:
-            print(f'{plan} : No result')
-            return False
+            return None
 
         data = plan_result.get('data') or {}
         result = data.get('result')
         if not isinstance(result, dict):
-            print(f'{plan} : malformed response')
-            return False
+            raise RuntimeError(f"malformed bridge response: {plan_result!r}")
 
-        action = result.get('action', '?')
-        if result.get('isdone'):
-            print(f"{action} complete")
-            return True
+        return result
 
-        err = result.get('error', '')
-        print(f"{action} failed{f': {err}' if err else ''}")
-        return False
+    def actionWork(self, action: str, target) -> dict | None:
+        """Convenience: build a single-skill plan and execute it.
 
-    def actionWork(self, action: str, target):
-        """Convenience: build a single-skill plan and execute it."""
+        Returns the same shape as :meth:`commWork`.
+        """
         if action == 'init_arm':
             return self.commWork('init_arm::', self.max_timeout)
 
@@ -109,11 +117,13 @@ def main():
         description="MQTT client for the robot_agent bridge",
     )
     p.add_argument("--mqtt-ip",
-                   default=os.environ.get("MQTT_SERVER_IP", "0.0.0.0"),
-                   help="MQTT broker IP (or ip/user/pass)")
+                   default=os.environ.get("MQTT_SERVER_IP"),
+                   help="MQTT broker IP (or ip/user/pass). "
+                        "Required: set this flag or MQTT_SERVER_IP env var.")
     p.add_argument("--timeout", type=float, default=180,
                    help="result timeout in seconds (default 180)")
-    p.add_argument("--quiet", action="store_true", help="suppress log output")
+    p.add_argument("--quiet", action="store_true",
+                   help="suppress MQTT connect/handler log output")
 
     sub = p.add_subparsers(dest="cmd", required=True, metavar="CMD")
 
@@ -127,6 +137,9 @@ def main():
 
     args = p.parse_args()
 
+    if not args.mqtt_ip:
+        p.error("--mqtt-ip is required (or set MQTT_SERVER_IP env var)")
+
     client = MqttClient(
         bPrint=not args.quiet,
         max_timeout=args.timeout,
@@ -136,10 +149,16 @@ def main():
         if args.cmd == "plan":
             # Decode literal \n into real newlines for CLI convenience.
             plan = args.plan.encode().decode("unicode_escape")
-            ok = client.commWork(plan, args.timeout)
+            result = client.commWork(plan, args.timeout)
         else:
-            ok = client.actionWork(args.action, args.target)
-        return 0 if ok else 1
+            result = client.actionWork(args.action, args.target)
+
+        if result is None:
+            print(json.dumps({"isdone": False, "error": "timeout or stopped"}, indent=2))
+            return 1
+
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0 if result.get("isdone") else 1
     finally:
         client.close()
 

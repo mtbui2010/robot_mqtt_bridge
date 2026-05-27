@@ -55,7 +55,12 @@ class Server:
 
         self._exec_lock = asyncio.Lock()
 
-        mqtt_ip = mqtt_ip or os.environ.get("MQTT_SERVER_IP", "0.0.0.0")
+        mqtt_ip = mqtt_ip or os.environ.get("MQTT_SERVER_IP")
+        if not mqtt_ip:
+            raise ValueError(
+                "[Server] MQTT broker IP is required. "
+                "Pass mqtt_ip=... or set the MQTT_SERVER_IP env var."
+            )
         self.mqttComm = MqttComm(
             mqtt_ip,
             [(self.KETI_TASK_MQTT_TOPIC, 1)],
@@ -187,10 +192,14 @@ def main():
                    default=os.environ.get("AGENT_URL", "ws://localhost:8001"),
                    help="robot_agent base URL (default ws://localhost:8001)")
     p.add_argument("--mqtt-ip",
-                   default=os.environ.get("MQTT_SERVER_IP", "0.0.0.0"),
-                   help="MQTT broker IP (or ip/user/pass)")
+                   default=os.environ.get("MQTT_SERVER_IP"),
+                   help="MQTT broker IP (or ip/user/pass). "
+                        "Required: set this flag or MQTT_SERVER_IP env var.")
     p.add_argument("--quiet", action="store_true", help="suppress log output")
     args = p.parse_args()
+
+    if not args.mqtt_ip:
+        p.error("--mqtt-ip is required (or set MQTT_SERVER_IP env var)")
 
     server = Server(
         agent_ws_url=args.agent_url,
