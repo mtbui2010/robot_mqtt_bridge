@@ -1,18 +1,16 @@
-"""MQTT client for sending structured plans to the robot bridge server.
+"""MQTT client for sending structured plans to the bridge server.
 
-Publishes plans to `cotap/keti/task/plan` and blocks on
+Publishes to `cotap/keti/task/plan` and blocks on
 `cotap/common/plan_result` for the response.
-
-Run:
-    python client.py                     # demo: move to "table@living room"
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
-from server import MqttComm
+from .mqtt_comm import MqttComm
 
 
 KETI_TASK_TOPIC = "cotap/keti/task/plan"
@@ -42,7 +40,10 @@ class MqttClient:
         self.mqttComm.mqtt_init()
 
     def commWork(self, plan: str, timeout: float):
-        """Send a structured plan and block for the result."""
+        """Send a structured plan and block for the result.
+
+        Returns True if isdone, False on failure, None if stopped.
+        """
         self.mqttComm.sendIt(self.KETI_TASK_MQTT_TOPIC, {'plan': plan})
         plan_result = self.mqttComm.getIt_f(self.PLAN_RESULT_MQTT_TOPIC, timeout)
 
@@ -71,22 +72,16 @@ class MqttClient:
     def actionWork(self, action: str, target):
         """Convenience: build a single-skill plan and execute it."""
         if action == 'init_arm':
-            plan = 'init_arm::'
-            return self.commWork(plan, self.max_timeout)
+            return self.commWork('init_arm::', self.max_timeout)
 
         elif action == 'move':
-            location = target
-            plan = f'move::{location}'
-            return self.commWork(plan, self.max_timeout * 2)
+            return self.commWork(f'move::{target}', self.max_timeout * 2)
 
         elif action == 'lift':
-            lift_move_pos = float(target)
-            plan = f'lift::{lift_move_pos}'
-            return self.commWork(plan, self.max_timeout)
+            return self.commWork(f'lift::{float(target)}', self.max_timeout)
 
         elif action == 'grip':
-            grip_type = int(target)
-            plan = 'grip::1000' if grip_type else 'grip::0'
+            plan = 'grip::1000' if int(target) else 'grip::0'
             return self.commWork(plan, self.max_timeout)
 
         raise ValueError(f'unknown action: {action!r}')
@@ -104,11 +99,44 @@ class MqttClient:
 
 
 def main():
-    mqttClient = MqttClient(bPrint=True)
+    p = argparse.ArgumentParser(
+        prog="robot-mqtt-client",
+        description="MQTT client for the robot_agent bridge",
+    )
+    p.add_argument("--mqtt-ip",
+                   default=os.environ.get("MQTT_SERVER_IP", "localhost"),
+                   help="MQTT broker IP (or ip/user/pass)")
+    p.add_argument("--timeout", type=float, default=180,
+                   help="result timeout in seconds (default 180)")
+    p.add_argument("--quiet", action="store_true", help="suppress log output")
+
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="CMD")
+
+    sp_plan = sub.add_parser("plan", help="send a raw plan string (multi-line OK)")
+    sp_plan.add_argument("plan", help='e.g. "find::apple\\nmove::kitchen"')
+
+    sp_action = sub.add_parser("action", help="send a single-skill action")
+    sp_action.add_argument("action", choices=["move", "lift", "grip", "init_arm"])
+    sp_action.add_argument("target", nargs="?", default="",
+                           help="action target (e.g. 'kitchen', '200', '1')")
+
+    args = p.parse_args()
+
+    client = MqttClient(
+        bPrint=not args.quiet,
+        max_timeout=args.timeout,
+        mqtt_ip=args.mqtt_ip,
+    )
     try:
-        mqttClient.actionWork("move", "table@living room")
+        if args.cmd == "plan":
+            # Decode literal \n into real newlines for CLI convenience.
+            plan = args.plan.encode().decode("unicode_escape")
+            ok = client.commWork(plan, args.timeout)
+        else:
+            ok = client.actionWork(args.action, args.target)
+        return 0 if ok else 1
     finally:
-        mqttClient.close()
+        client.close()
 
 
 if __name__ == "__main__":

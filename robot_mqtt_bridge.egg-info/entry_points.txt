@@ -1,0 +1,3 @@
+[console_scripts]
+robot-mqtt-client = robot_mqtt_bridge.client:main
+robot-mqtt-server = robot_mqtt_bridge.server:main

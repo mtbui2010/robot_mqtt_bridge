@@ -1,3 +1,20 @@
+Metadata-Version: 2.4
+Name: robot_mqtt_bridge
+Version: 0.1.0
+Summary: MQTT ↔ robot_agent bridge — receive structured plans over MQTT, execute via robot_agent.
+Author: KETI
+License: MIT
+Project-URL: Homepage, https://github.com/keti/robot_mqtt_bridge
+Keywords: mqtt,robot,robot_agent,bridge
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Communications
+Classifier: Topic :: Scientific/Engineering :: Robotics
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: paho-mqtt>=1.6
+Requires-Dist: websockets>=12
+Requires-Dist: numpy
+
 # robot_mqtt_bridge
 
 Self-contained Python package that bridges an MQTT broker with a running
