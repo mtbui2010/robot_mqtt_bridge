@@ -15,6 +15,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from datetime import datetime
 
 import websockets
@@ -183,6 +184,73 @@ class Server:
         self.loop_thread.join(timeout=2.0)
 
 
+def _find_other_server_pids() -> list[int]:
+    """Find PIDs of other running `robot-mqtt-server` processes (excludes self)."""
+    own_pid = os.getpid()
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == own_pid:
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                raw = f.read()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        # Match individual argv tokens (script path or bare name), not a
+        # substring of the whole cmdline -- otherwise any shell command that
+        # merely *mentions* "robot-mqtt-server" (e.g. a diagnostic echo/pgrep
+        # one-liner) would be mistaken for a real bridge process.
+        argv = [a.decode(errors="replace") for a in raw.split(b"\x00") if a]
+        if any(a == "robot-mqtt-server" or a.endswith("/robot-mqtt-server") for a in argv):
+            pids.append(pid)
+    return pids
+
+
+def _terminate_other_servers(wait_s: float = 5.0) -> int:
+    """SIGTERM (then SIGKILL if needed) every other running robot-mqtt-server process."""
+    pids = _find_other_server_pids()
+    if not pids:
+        print("[terminate] no other robot-mqtt-server processes found")
+        return 0
+
+    print(f"[terminate] found {len(pids)} process(es): {pids}")
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"[terminate] sent SIGTERM to {pid}")
+        except ProcessLookupError:
+            print(f"[terminate] {pid} already gone")
+        except PermissionError:
+            print(f"[terminate] permission denied signaling {pid}")
+
+    deadline = time.monotonic() + wait_s
+    remaining = set(pids)
+    while remaining and time.monotonic() < deadline:
+        remaining = {pid for pid in remaining if os.path.exists(f"/proc/{pid}")}
+        if remaining:
+            time.sleep(0.2)
+
+    failed = []
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            print(f"[terminate] {pid} did not exit in {wait_s}s, sent SIGKILL")
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            print(f"[terminate] permission denied killing {pid}")
+            failed.append(pid)
+
+    if failed:
+        print(f"[terminate] could not terminate: {failed}")
+        return 1
+    print(f"[terminate] done, {len(pids)} process(es) terminated")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="robot-mqtt-server",
@@ -196,7 +264,15 @@ def main():
                    help="MQTT broker IP (or ip/user/pass). "
                         "Required: set this flag or MQTT_SERVER_IP env var.")
     p.add_argument("--quiet", action="store_true", help="suppress log output")
+
+    sub = p.add_subparsers(dest="cmd", metavar="CMD")
+    sub.add_parser("terminate",
+                    help="terminate all other running robot-mqtt-server processes")
+
     args = p.parse_args()
+
+    if args.cmd == "terminate":
+        return _terminate_other_servers()
 
     if not args.mqtt_ip:
         p.error("--mqtt-ip is required (or set MQTT_SERVER_IP env var)")

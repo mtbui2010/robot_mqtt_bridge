@@ -20,7 +20,7 @@ PLAN_RESULT_TOPIC = "cotap/common/plan_result"
 
 class MqttClient:
 
-    def __init__(self, bPrint: bool = False, max_timeout: int = 180,
+    def __init__(self, bPrint: bool = False, max_timeout: int = 600,
                  mqtt_ip: str | None = None):
         self.bPrint = bPrint
         self.max_timeout = max_timeout
@@ -111,6 +111,47 @@ class MqttClient:
         self.mqttComm.flush_and_close(timeout=2.0)
 
 
+def _run_loop(run_once, ntimes: int, keep_on_error: bool) -> int:
+    """Call ``run_once()`` up to ``ntimes`` times.
+
+    ``run_once`` takes no args and returns a result dict (or ``None`` on
+    timeout/stop), matching ``MqttClient.commWork``/``actionWork``.
+
+    With ``ntimes == 1`` this prints a single plain result JSON, unchanged
+    from the pre-loop behavior (keeps `| jq` pipelines working). For
+    ``ntimes > 1`` it streams a "--- run i/N ---" header + result per
+    iteration and a summary line at the end, stopping after the first
+    failure unless ``keep_on_error`` is set. Returns 0 only if every
+    attempted run had ``isdone=True``.
+    """
+    if ntimes == 1:
+        result = run_once()
+        if result is None:
+            result = {"isdone": False, "error": "timeout or stopped"}
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0 if result.get("isdone") else 1
+
+    n_success = 0
+    n_fail = 0
+    for i in range(1, ntimes + 1):
+        print(f"--- run {i}/{ntimes} ---")
+        result = run_once()
+        if result is None:
+            result = {"isdone": False, "error": "timeout or stopped"}
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+        if result.get("isdone"):
+            n_success += 1
+        else:
+            n_fail += 1
+            if not keep_on_error:
+                break
+
+    print(f"--- summary: {n_success} succeeded, {n_fail} failed, "
+          f"{n_success + n_fail}/{ntimes} run ---")
+    return 0 if n_fail == 0 else 1
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="robot-mqtt-client",
@@ -120,15 +161,26 @@ def main():
                    default=os.environ.get("MQTT_SERVER_IP"),
                    help="MQTT broker IP (or ip/user/pass). "
                         "Required: set this flag or MQTT_SERVER_IP env var.")
-    p.add_argument("--timeout", type=float, default=180,
-                   help="result timeout in seconds (default 180)")
+    p.add_argument("--timeout", type=float, default=600,
+                   help="result timeout in seconds (default 600); for multi-step "
+                        "plans (plan/plan-file), this bounds the whole sequence, "
+                        "not each individual step")
     p.add_argument("--quiet", action="store_true",
                    help="suppress MQTT connect/handler log output")
+    p.add_argument("--ntimes", type=int, default=1,
+                   help="number of times to run the command (default 1); "
+                        "applies to plan, plan-file, and action")
+    p.add_argument("--keep-on-error", action="store_true",
+                   help="with --ntimes > 1, keep looping after a failed run "
+                        "instead of stopping (default: stop on first error)")
 
     sub = p.add_subparsers(dest="cmd", required=True, metavar="CMD")
 
     sp_plan = sub.add_parser("plan", help="send a raw plan string (multi-line OK)")
     sp_plan.add_argument("plan", help='e.g. "find::apple\\nmove::kitchen"')
+
+    sp_plan_file = sub.add_parser("plan-file", help="send a plan read from a file")
+    sp_plan_file.add_argument("file_path", help="path to a file containing the plan text")
 
     sp_action = sub.add_parser("action", help="send a single-skill action")
     sp_action.add_argument("action", choices=["move", "lift", "grip", "init_arm"])
@@ -139,6 +191,8 @@ def main():
 
     if not args.mqtt_ip:
         p.error("--mqtt-ip is required (or set MQTT_SERVER_IP env var)")
+    if args.ntimes < 1:
+        p.error("--ntimes must be >= 1")
 
     client = MqttClient(
         bPrint=not args.quiet,
@@ -146,19 +200,18 @@ def main():
         mqtt_ip=args.mqtt_ip,
     )
     try:
-        if args.cmd == "plan":
+        if args.cmd == "plan-file":
+            with open(args.file_path, "r", encoding="utf-8") as f:
+                plan = f.read()
+            run_once = lambda: client.commWork(plan, args.timeout)
+        elif args.cmd == "plan":
             # Decode literal \n into real newlines for CLI convenience.
             plan = args.plan.encode().decode("unicode_escape")
-            result = client.commWork(plan, args.timeout)
+            run_once = lambda: client.commWork(plan, args.timeout)
         else:
-            result = client.actionWork(args.action, args.target)
+            run_once = lambda: client.actionWork(args.action, args.target)
 
-        if result is None:
-            print(json.dumps({"isdone": False, "error": "timeout or stopped"}, indent=2))
-            return 1
-
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        return 0 if result.get("isdone") else 1
+        return _run_loop(run_once, args.ntimes, args.keep_on_error)
     finally:
         client.close()
 

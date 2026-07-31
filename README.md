@@ -88,8 +88,18 @@ from robot_mqtt_bridge import MqttComm, Server, MqttClient
 | `robot-mqtt-server --mqtt-ip "BROKER/user/pass"` | broker auth (slash-separated) |
 | `robot-mqtt-server --mqtt-ip BROKER --quiet` | suppress logs |
 | `AGENT_URL=… MQTT_SERVER_IP=… robot-mqtt-server` | via env vars |
+| `robot-mqtt-server terminate` | find and stop every *other* running `robot-mqtt-server` process (SIGTERM, then SIGKILL after 5s if still alive) |
 
 Stops cleanly on `Ctrl+C` / `SIGTERM` (publishes `online:false`).
+
+**Why `terminate` matters**: running two `robot-mqtt-server` processes at once
+(e.g. one started via `--mqtt-ip 127.0.0.1` and another via `--mqtt-ip
+<LAN-ip>` pointing at the *same* broker) means both subscribe to
+`cotap/keti/task/plan` and both forward every incoming plan to `robot_agent`
+independently — each holds its own lock, so neither sees the other as "busy",
+and the robot can receive the same command twice concurrently. Run
+`robot-mqtt-server terminate` before starting a fresh instance if you're not
+sure whether one is already running.
 
 ### Client
 
@@ -100,8 +110,24 @@ Stops cleanly on `Ctrl+C` / `SIGTERM` (publishes `online:false`).
 | `robot-mqtt-client --mqtt-ip BROKER action grip 1` | grip close (`0` = open) |
 | `robot-mqtt-client --mqtt-ip BROKER action init_arm` | reset arm |
 | `robot-mqtt-client --mqtt-ip BROKER plan "find::apple\nmove::kitchen\npick::"` | raw multi-step plan |
-| `robot-mqtt-client --mqtt-ip BROKER --timeout 60 plan "..."` | custom timeout (default 180s) |
+| `robot-mqtt-client --mqtt-ip BROKER plan-file my_plan.txt` | send a plan read from a file (real newlines, no `\n` escaping) |
+| `robot-mqtt-client --mqtt-ip BROKER --timeout 60 plan "..."` | custom timeout (default 600s; bounds the whole plan, not each step — long multi-step `plan-file` runs may need more) |
 | `robot-mqtt-client --mqtt-ip BROKER --quiet plan "..."` | suppress MQTT/connect logs (still prints result JSON) |
+
+`--ntimes` and `--keep-on-error` are global flags (put them before the
+subcommand) and work with `plan`, `plan-file`, and `action` alike:
+
+| Command | Purpose |
+|---|---|
+| `robot-mqtt-client --mqtt-ip BROKER --ntimes 5 action move kitchen` | repeat one action 5 times; stops after the first failed run |
+| `robot-mqtt-client --mqtt-ip BROKER --ntimes 5 --keep-on-error plan-file my_plan.txt` | run a plan-file 5 times, continuing past failures |
+| `robot-mqtt-client --mqtt-ip BROKER --ntimes 3 plan "find::apple"` | repeat a raw plan string 3 times |
+
+With `--ntimes` left at its default (1), output/exit-code behavior is
+unchanged (single JSON result, exit 0 on `isdone`). With `--ntimes > 1`,
+each run prints a `--- run i/N ---` header + result, followed by a
+`--- summary: X succeeded, Y failed, Z/N run ---` line; exit code is 0
+only if every attempted run had `isdone=true`.
 
 `--mqtt-ip` is required (or set `MQTT_SERVER_IP`).
 
