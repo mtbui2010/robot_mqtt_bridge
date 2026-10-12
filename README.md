@@ -15,6 +15,8 @@ your script / mosquitto_pub ─► broker ─► robot-mqtt-server ─► ws://�
 
 ## Quickstart
 
+Don't have an MQTT broker yet? See [Setting up an MQTT broker](#setting-up-an-mqtt-broker-mosquitto) below first.
+
 ```bash
 # 0. install
 pip install -e .
@@ -54,6 +56,85 @@ If you forget:
 $ robot-mqtt-server
 robot-mqtt-server: error: --mqtt-ip is required (or set MQTT_SERVER_IP env var)
 ```
+
+---
+
+## Setting up an MQTT broker (mosquitto)
+
+The bridge and client don't provide a broker — you need a real MQTT broker
+(e.g. [mosquitto](https://mosquitto.org/)) reachable by every machine that
+runs `robot-mqtt-server` or `robot-mqtt-client`.
+
+### Install (Ubuntu/Debian)
+
+```bash
+sudo apt update
+sudo apt install -y mosquitto mosquitto-clients
+```
+
+### Allow LAN connections (not just localhost)
+
+By default mosquitto only binds `127.0.0.1`/`::1` — fine if the bridge and
+every client run on the *same* machine, but useless the moment a client
+runs elsewhere (the common case: robot backend + bridge on the robot's PC,
+`robot-mqtt-client` run from a laptop). Add a listener config, e.g.
+`/etc/mosquitto/conf.d/listener.conf`:
+
+```
+listener 1883 0.0.0.0
+allow_anonymous true
+```
+
+Then **restart** the service — editing the config alone has no effect on
+an already-running broker:
+
+```bash
+sudo systemctl restart mosquitto
+```
+
+Verify it's actually listening on the LAN interface, not just loopback:
+
+```bash
+ss -tlnp | grep 1883
+# want: 0.0.0.0:1883   (NOT 127.0.0.1:1883 / [::1]:1883)
+```
+
+If you only see `127.0.0.1:1883`, the config wasn't picked up (wrong file,
+service not restarted, or a syntax error — check `journalctl -u mosquitto`).
+
+### Sanity-check pub/sub
+
+Before touching the bridge at all, confirm the broker itself works and is
+reachable from where you expect clients to run:
+
+```bash
+# on the broker machine, or any machine on the LAN if the listener is 0.0.0.0
+mosquitto_sub -h <broker-ip> -t 'test/sanity' -v &
+mosquitto_pub -h <broker-ip> -t 'test/sanity' -m 'hello'
+# subscriber should print: test/sanity hello
+```
+
+`Connection refused` here means the broker isn't reachable at that IP/port
+— fix that before debugging the bridge (see Troubleshooting below).
+
+### Security note
+
+`allow_anonymous true` means **anyone on the LAN can publish plans and
+control the robot**, with no authentication. That's fine for a closed dev/lab
+network but not for anything more exposed. For basic auth, add a password
+file instead:
+
+```bash
+sudo mosquitto_passwd -c /etc/mosquitto/passwd some_user
+```
+```
+# /etc/mosquitto/conf.d/listener.conf
+listener 1883 0.0.0.0
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+```
+Then use `--mqtt-ip "BROKER/some_user/password"` (slash-separated, see the
+CLI cheatsheet below) on both the server and client.
 
 ---
 
@@ -332,8 +413,9 @@ Always treat the result as a dict — check `result is None` first, then
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `--mqtt-ip is required` on startup | No flag and no env var | Set `--mqtt-ip` or export `MQTT_SERVER_IP` |
-| `[MQTT] Connect failed: [Errno 111] Connection refused` | No broker at the IP you gave | `nc -zv <broker> 1883` to verify; check `192.168.1.X` != your own machine's IP unless broker is local |
+| `[MQTT] Connect failed: [Errno 111] Connection refused` | No broker at the IP you gave, or broker only bound to `127.0.0.1` | `nc -zv <broker> 1883` to verify; check `192.168.1.X` != your own machine's IP unless broker is local; see [Setting up an MQTT broker](#setting-up-an-mqtt-broker-mosquitto) |
 | `Connection refused` when using `--mqtt-ip 0.0.0.0` or your own LAN IP | IP routes back to YOUR machine; no broker there | Use the IP of the machine actually running the broker |
+| `robot-mqtt-server --mqtt-ip <own-LAN-ip>` fails even run *locally* on the broker's own machine | mosquitto only listening on `127.0.0.1`/`::1`, not the LAN interface | `ss -tlnp \| grep 1883` — if it shows `127.0.0.1:1883` only, add `listener 1883 0.0.0.0` and restart mosquitto |
 | Returns `None` (timeout) | Bridge not running, or `robot_agent` down | `robot-mqtt-server` running? `curl localhost:8001/skills` returns? |
 | `action="busy"`, `isdone:false` immediately | Another plan still executing | Wait or queue plans client-side (bridge enforces serial execution) |
 | `action="unknown"`, `error="ws transport error: ..."` | Bridge can't reach robot_agent | Check `--agent-url`; agent listening on port? |
